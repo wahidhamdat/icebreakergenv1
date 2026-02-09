@@ -454,10 +454,10 @@ with tab_supabase:
         if st.button("Sync New Contacts", use_container_width=True, help="Copy contacts not yet in ice table", key="sync_contacts"):
             with st.spinner("Syncing contacts..."):
                 try:
-                ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
-                ice_emails = {r["email"] for r in ice_rows if r.get("email")}
-                contacts = load_contacts(supabase_url, supabase_key)
-                count = sync_contacts_to_ice(supabase_url, supabase_key, ice_table_name, contacts, ice_emails, on_conflict_column)
+                    ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
+                    ice_emails = {r["email"] for r in ice_rows if r.get("email")}
+                    contacts = load_contacts(supabase_url, supabase_key)
+                    count = sync_contacts_to_ice(supabase_url, supabase_key, ice_table_name, contacts, ice_emails, on_conflict_column)
                     if count > 0:
                         st.success(f"Synced {count} new contacts. Click 'Load Data' to refresh.")
                     else:
