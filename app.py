@@ -171,54 +171,27 @@ def load_ice_table(url: str, key: str, table_name: str, limit: int = 2000) -> li
     return resp.json()
 
 
-def load_contacts(url: str, key: str, contacts_table_name: str = "contacts") -> list[dict]:
-    """Load contacts that have an email address from the given table."""
+def _normalize_contact_row(r: dict) -> dict:
+    """Normalize contacts table row so build_user_prompt and upsert_to_ice see consistent keys."""
+    out = dict(r)
+    if "company_website" in out and "website" not in out:
+        out["website"] = out.get("company_website") or ""
+    if "employees_count" in out:
+        out["employees"] = out.get("employees_count") if out.get("employees_count") is not None else out.get("employees", "")
+    return out
+
+
+def load_contacts(url: str, key: str, contacts_table_name: str, limit: int = 2000) -> list[dict]:
+    """Load contacts that have an email from the given table. Rows normalized for prompts/upsert."""
     resp = requests.get(
         f"{url}/rest/v1/{contacts_table_name}",
-        params={"select": "*", "email": "not.is.null", "limit": "2000"},
+        params={"select": "*", "email": "not.is.null", "limit": str(limit)},
         headers=supabase_headers(key),
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()
-
-
-def sync_contacts_to_ice(url: str, key: str, table_name: str, contacts: list[dict], ice_emails: set, on_conflict: str = "email") -> int:
-    """Copy contacts that aren't in the ice table yet (with null ai_icebreaker)."""
-    headers = supabase_headers(key)
-    headers["Prefer"] = "resolution=merge-duplicates"
-    synced = 0
-
-    for c in contacts:
-        email = c.get("email")
-        if not email or email in ice_emails:
-            continue
-
-        body = {
-            "ai_icebreaker": None,
-            "first_name": c.get("first_name", ""),
-            "last_name": c.get("last_name", ""),
-            "full_name": c.get("full_name", ""),
-            "email": email,
-            "title": c.get("title", ""),
-            "headline": c.get("headline", ""),
-            "seniority": c.get("seniority", ""),
-            "department": c.get("department", ""),
-            "city": c.get("city", ""),
-            "country": c.get("country", ""),
-            "linkedin_url": c.get("linkedin_url", ""),
-            "company": c.get("company", ""),
-            "website": c.get("company_website") or c.get("website", ""),
-            "company_linkedin": c.get("company_linkedin", ""),
-            "industry": c.get("industry", ""),
-            "employees": c.get("employees_count") or c.get("employees", ""),
-            "keywords": c.get("keywords", ""),
-        }
-        resp = requests.post(f"{url}/rest/v1/{table_name}?on_conflict={on_conflict}", json=body, headers=headers, timeout=30)
-        resp.raise_for_status()
-        synced += 1
-
-    return synced
+    rows = resp.json()
+    return [_normalize_contact_row(r) for r in rows]
 
 
 def upsert_to_ice(url: str, key: str, table_name: str, row: dict, icebreaker: str, on_conflict: str = "email") -> None:
@@ -413,21 +386,29 @@ with st.sidebar:
         )
 
     st.divider()
-    st.header("Source and destination")
-    contacts_table_name = st.text_input(
-        "Contacts table (source)",
-        value=os.environ.get("CONTACTS_TABLE_NAME", "contacts"),
-        help="Supabase table to load contacts from for Sync. Override with env CONTACTS_TABLE_NAME.",
-    )
+    st.header("Ice table")
     ice_table_name = st.text_input(
-        "Ice table (destination)",
+        "Ice table name",
         value=os.environ.get("ICE_TABLE_NAME", "ice"),
-        help="Supabase table where icebreakers are saved. Override with env ICE_TABLE_NAME.",
+        help="Supabase table to load from and save icebreakers to. Override with env ICE_TABLE_NAME.",
     )
     on_conflict_column = st.text_input(
         "Upsert conflict column",
         value="email",
         help="Unique column for merge (e.g. email). Must match a unique constraint on the ice table.",
+    )
+    st.header("Contacts table")
+    contacts_table_name = st.text_input(
+        "Contacts table name",
+        value=os.environ.get("CONTACTS_TABLE_NAME", "contacts"),
+        help="Supabase table to load contacts from (used in From contacts tab). Override with env CONTACTS_TABLE_NAME.",
+    )
+    max_contacts_to_load = st.number_input(
+        "Max contacts to load",
+        min_value=1,
+        max_value=10000,
+        value=2000,
+        help="Max rows to fetch from the contacts table when using From contacts.",
     )
 
 keys_ready = bool(supabase_url and supabase_key and cerebras_key)
@@ -437,48 +418,57 @@ if not supabase_ready:
     st.info("Enter your Supabase URL and Anon Key in the sidebar to get started.")
     st.stop()
 
-# Show source and destination so user has full control
-st.caption(f"**Source:** Supabase — contacts from table **{contacts_table_name}**. **Destination:** Icebreakers saved to table **{ice_table_name}**. Edit in sidebar under \"Source and destination\".")
+st.caption(f"**Ice table:** fill nulls from Supabase table **{ice_table_name}**, or add **new** rows from the **contacts** table **{contacts_table_name}** (emails not already in ice). Configure in sidebar.")
 
 # ===================================================================
 # Data source: tabs
 # ===================================================================
-tab_supabase, tab_csv, tab_url = st.tabs(["From Supabase", "Upload CSV", "Import from URL"])
+tab_contacts, tab_supabase, tab_csv, tab_url = st.tabs(["From contacts", "From Supabase", "Upload CSV", "Import from URL"])
+
+# --- Tab: From contacts ---
+with tab_contacts:
+    if st.button("Load from contacts", type="primary", key="load_from_contacts"):
+        with st.spinner("Loading contacts and ice table..."):
+            try:
+                contacts = load_contacts(supabase_url, supabase_key, contacts_table_name, max_contacts_to_load)
+                ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
+                ice_emails = {r["email"] for r in ice_rows if r.get("email")}
+                pending = [c for c in contacts if c.get("email") and c["email"] not in ice_emails]
+                st.session_state["data_source"] = "contacts"
+                st.session_state["contacts_pending"] = pending
+                st.session_state["stop_requested"] = False
+            except Exception as e:
+                st.error(f"Failed to load: {e}")
+    contacts_pending = st.session_state.get("contacts_pending") if st.session_state.get("data_source") == "contacts" else None
+    if contacts_pending is not None:
+        st.metric("Contacts not yet in ice table", len(contacts_pending))
+        if contacts_pending:
+            preview_cols = ["email", "first_name", "company", "title"]
+            display_cols = [c for c in preview_cols if any(c in r for r in contacts_pending)]
+            if display_cols:
+                st.dataframe(pd.DataFrame(contacts_pending)[display_cols].fillna(""), use_container_width=True, hide_index=True, height=250)
+        else:
+            st.info("All loaded contacts are already in the ice table.")
+    else:
+        st.info("Click **Load from contacts** to fetch contacts and compare with the ice table.")
 
 # --- Tab: From Supabase ---
 with tab_supabase:
-    col_load, col_sync = st.columns([1, 1])
-    with col_load:
-        if st.button("Load Data", type="primary", use_container_width=True, key="load_data"):
-            with st.spinner("Loading ice table from Supabase..."):
-                try:
-                    data = load_ice_table(supabase_url, supabase_key, ice_table_name)
-                    st.session_state["ice_data"] = data
-                    st.session_state["data_source"] = "supabase"
-                    st.session_state["stop_requested"] = False
-                except Exception as e:
-                    st.error(f"Failed to load ice table: {e}")
-    with col_sync:
-        if st.button("Sync New Contacts", use_container_width=True, help="Copy contacts not yet in ice table", key="sync_contacts"):
-            with st.spinner("Syncing contacts..."):
-                try:
-                    ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
-                    ice_emails = {r["email"] for r in ice_rows if r.get("email")}
-                    contacts = load_contacts(supabase_url, supabase_key, contacts_table_name)
-                    count = sync_contacts_to_ice(supabase_url, supabase_key, ice_table_name, contacts, ice_emails, on_conflict_column)
-                    if count > 0:
-                        st.success(f"Synced {count} new contacts. Click 'Load Data' to refresh.")
-                    else:
-                        st.info("All contacts already in ice table.")
-                    st.session_state["ice_data"] = load_ice_table(supabase_url, supabase_key, ice_table_name)
-                except Exception as e:
-                    st.error(f"Failed to sync: {e}")
+    if st.button("Load Data", type="primary", key="load_data"):
+        with st.spinner("Loading ice table from Supabase..."):
+            try:
+                data = load_ice_table(supabase_url, supabase_key, ice_table_name)
+                st.session_state["ice_data"] = data
+                st.session_state["data_source"] = "supabase"
+                st.session_state["stop_requested"] = False
+            except Exception as e:
+                st.error(f"Failed to load ice table: {e}")
 
     ice_data = st.session_state.get("ice_data")
     if ice_data is None:
         st.info("Click **Load Data** to fetch the ice table from Supabase.")
     elif not ice_data:
-        st.warning("Ice table is empty. Click **Sync New Contacts** to pull contacts in.")
+        st.warning("Ice table is empty. Add rows in Supabase, or use **Upload CSV** / **Import from URL** to generate icebreakers.")
     else:
         df = pd.DataFrame(ice_data)
         df["has_icebreaker"] = df["ai_icebreaker"].apply(
@@ -541,6 +531,8 @@ if data_source == "supabase":
             if not row.get("ai_icebreaker") or not str(row.get("ai_icebreaker", "")).strip()
             or str(row["ai_icebreaker"]).strip().startswith(("ERROR", "API_ERROR", "REASONING_EXHAUSTED"))
         ]
+elif data_source == "contacts":
+    to_process = st.session_state.get("contacts_pending") or []
 else:
     to_process = st.session_state.get("queue") or []
 
@@ -556,6 +548,8 @@ if not keys_ready:
 elif pending_count == 0:
     if data_source == "supabase":
         st.success("All rows already have icebreakers, or load data first.")
+    elif data_source == "contacts":
+        st.info("Click **Load from contacts** in the From contacts tab, or all loaded contacts are already in the ice table.")
     else:
         st.info("Load contacts via CSV or URL first, then generate.")
 else:
