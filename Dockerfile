@@ -11,5 +11,5 @@ EXPOSE 8501
 
 ENV PORT=8501
 
-# Use shell so PORT from env (e.g. Render) is applied
-CMD ["sh", "-c", "exec streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true"]
+# Use shell so PORT from env (e.g. Render) is applied; default 8501 if unset
+CMD ["sh", "-c", "exec streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true"]

@@ -171,6 +171,35 @@ def load_ice_table(url: str, key: str, table_name: str, limit: int = 2000) -> li
     return resp.json()
 
 
+def get_ice_row_by_email(url: str, key: str, table_name: str, email: str):
+    """Fetch one ice table row by email. Returns the row dict or None if not found."""
+    email = (email or "").strip()
+    if not email:
+        return None
+    resp = requests.get(
+        f"{url}/rest/v1/{table_name}",
+        params={"select": "email,ai_icebreaker", "email": f"eq.{quote(email, safe='')}"},
+        headers=supabase_headers(key),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    rows = resp.json()
+    return rows[0] if rows else None
+
+
+def has_valid_icebreaker(row) -> bool:
+    """True if row has a non-empty ai_icebreaker that is not an error placeholder."""
+    if not row or not isinstance(row, dict):
+        return False
+    val = row.get("ai_icebreaker")
+    if val is None or not str(val).strip():
+        return False
+    s = str(val).strip()
+    if s.startswith(("ERROR", "API_ERROR", "REASONING_EXHAUSTED")):
+        return False
+    return True
+
+
 def _normalize_contact_row(r: dict) -> dict:
     """Normalize contacts table row so build_user_prompt and upsert_to_ice see consistent keys."""
     out = dict(r)
@@ -432,8 +461,12 @@ with tab_contacts:
             try:
                 contacts = load_contacts(supabase_url, supabase_key, contacts_table_name, max_contacts_to_load)
                 ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
-                ice_emails = {r["email"] for r in ice_rows if r.get("email")}
-                pending = [c for c in contacts if c.get("email") and c["email"] not in ice_emails]
+                ice_by_email = {(r.get("email") or "").strip().lower(): r for r in ice_rows if r.get("email")}
+                pending = [
+                    c for c in contacts
+                    if c.get("email")
+                    and not has_valid_icebreaker(ice_by_email.get((c.get("email") or "").strip().lower()))
+                ]
                 st.session_state["data_source"] = "contacts"
                 st.session_state["contacts_pending"] = pending
                 st.session_state["stop_requested"] = False
@@ -583,9 +616,21 @@ else:
                 break
 
             name = row.get("first_name") or "Unknown"
-            email = row.get("email") or "?"
+            email = (row.get("email") or "?").strip()
+            email_display = email or "?"
             company = row.get("company") or ""
-            progress_bar.progress(i / len(to_process), text=f"[{i+1}/{len(to_process)}] {name} ({email})")
+            progress_bar.progress(i / len(to_process), text=f"[{i+1}/{len(to_process)}] {name} ({email_display})")
+
+            # Live check by email: skip if ice table already has a valid icebreaker
+            try:
+                ice_row = get_ice_row_by_email(supabase_url, supabase_key, ice_table_name, email)
+                if has_valid_icebreaker(ice_row):
+                    with log_area:
+                        st.info(f"Skipped (already has icebreaker): {email_display}")
+                    results.append({"name": name, "email": email_display, "company": company, "icebreaker": "[Skipped]", "saved": False})
+                    continue
+            except Exception:
+                pass  # Proceed to generate if check fails (e.g. network)
 
             try:
                 icebreaker = generate_icebreaker(cerebras_key, row)
@@ -599,7 +644,7 @@ else:
                 saved = False
                 icebreaker = f"{icebreaker} | SAVE_ERROR: {e}"
 
-            results.append({"name": name, "email": email, "company": company, "icebreaker": icebreaker, "saved": saved})
+            results.append({"name": name, "email": email_display, "company": company, "icebreaker": icebreaker, "saved": saved})
 
             with log_area:
                 if icebreaker.startswith(("ERROR", "API_ERROR", "REASONING_EXHAUSTED")):

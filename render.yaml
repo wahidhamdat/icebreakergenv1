@@ -8,6 +8,7 @@
 # Env vars: SUPABASE_URL, SUPABASE_ANON_KEY, LEADS_TABLE_NAME, ICE_TABLE_NAME, REJECTED_TABLE_NAME,
 #   VALIDATION_API_URL (optional), APIFY_TOKEN, APIFY_ACTOR_ID, AI_API_URL, AI_API_KEY, AI_MODEL
 #
+# If your repo root is the parent of this folder (e.g. icebreaker-app), add rootDir: icebreakergenv1 to both services.
 services:
   - type: web
     name: icebreaker-app
@@ -20,6 +21,6 @@ services:
     name: lead-outreach-app
     runtime: docker
     dockerfilePath: ./Dockerfile
-    dockerCommand: streamlit run lead_outreach_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    dockerCommand: sh -c "exec streamlit run lead_outreach_app.py --server.port=${PORT:-10000} --server.address=0.0.0.0 --server.headless=true"
     healthCheckPath: /_stcore/health
     plan: free
