@@ -1,9 +1,25 @@
-# Render Blueprint: Icebreaker Generator (Streamlit)
-# Set env vars in Render Dashboard: SUPABASE_URL, SUPABASE_ANON_KEY, CEREBRAS_API_KEY, ICE_TABLE_NAME (optional)
+# Render Blueprint: Icebreaker Generator + Lead Outreach Pipeline (Streamlit)
+# Both services use the same Dockerfile; each runs a different Streamlit app.
+#
+# --- Icebreaker app (default) ---
+# Env vars: SUPABASE_URL, SUPABASE_ANON_KEY, CEREBRAS_API_KEY, ICE_TABLE_NAME (optional), CONTACTS_TABLE_NAME (optional)
+#
+# --- Lead Outreach app ---
+# Env vars: SUPABASE_URL, SUPABASE_ANON_KEY, LEADS_TABLE_NAME, ICE_TABLE_NAME, REJECTED_TABLE_NAME,
+#   VALIDATION_API_URL (optional), APIFY_TOKEN, APIFY_ACTOR_ID, AI_API_URL, AI_API_KEY, AI_MODEL
+#
 services:
   - type: web
     name: icebreaker-app
     runtime: docker
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    plan: free
+
+  - type: web
+    name: lead-outreach-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: streamlit run lead_outreach_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
     healthCheckPath: /_stcore/health
     plan: free
