@@ -1,0 +1,9 @@
+# Render Blueprint: Icebreaker Generator (Streamlit)
+# Set env vars in Render Dashboard: SUPABASE_URL, SUPABASE_ANON_KEY, CEREBRAS_API_KEY, ICE_TABLE_NAME (optional)
+services:
+  - type: web
+    name: icebreaker-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    plan: free

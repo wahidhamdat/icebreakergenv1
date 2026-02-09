@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      - PORT=8501
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY:-}
+      - ICE_TABLE_NAME=${ICE_TABLE_NAME:-ice}
+    restart: unless-stopped

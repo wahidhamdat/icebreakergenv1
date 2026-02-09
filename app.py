@@ -1,3 +1,5 @@
+import os
+from urllib.parse import quote
 import streamlit as st
 import requests
 import time
@@ -157,10 +159,10 @@ def supabase_headers(key: str) -> dict:
     }
 
 
-def load_ice_table(url: str, key: str, limit: int = 2000) -> list[dict]:
+def load_ice_table(url: str, key: str, table_name: str, limit: int = 2000) -> list[dict]:
     """Load the full ice table from Supabase."""
     resp = requests.get(
-        f"{url}/rest/v1/ice",
+        f"{url}/rest/v1/{table_name}",
         params={"select": "*", "limit": str(limit)},
         headers=supabase_headers(key),
         timeout=30,
@@ -181,7 +183,7 @@ def load_contacts(url: str, key: str) -> list[dict]:
     return resp.json()
 
 
-def sync_contacts_to_ice(url: str, key: str, contacts: list[dict], ice_emails: set) -> int:
+def sync_contacts_to_ice(url: str, key: str, table_name: str, contacts: list[dict], ice_emails: set, on_conflict: str = "email") -> int:
     """Copy contacts that aren't in the ice table yet (with null ai_icebreaker)."""
     headers = supabase_headers(key)
     headers["Prefer"] = "resolution=merge-duplicates"
@@ -212,15 +214,15 @@ def sync_contacts_to_ice(url: str, key: str, contacts: list[dict], ice_emails: s
             "employees": c.get("employees_count") or c.get("employees", ""),
             "keywords": c.get("keywords", ""),
         }
-        resp = requests.post(f"{url}/rest/v1/ice", json=body, headers=headers, timeout=30)
+        resp = requests.post(f"{url}/rest/v1/{table_name}?on_conflict={on_conflict}", json=body, headers=headers, timeout=30)
         resp.raise_for_status()
         synced += 1
 
     return synced
 
 
-def upsert_to_ice(url: str, key: str, row: dict, icebreaker: str) -> None:
-    """UPSERT a row into the ice table with the generated icebreaker."""
+def upsert_to_ice(url: str, key: str, table_name: str, row: dict, icebreaker: str, on_conflict: str = "email") -> None:
+    """UPSERT a row into the ice table with the generated icebreaker. Uses on_conflict for merge; on 409 retries with PATCH."""
     headers = supabase_headers(key)
     headers["Prefer"] = "resolution=merge-duplicates"
 
@@ -245,8 +247,22 @@ def upsert_to_ice(url: str, key: str, row: dict, icebreaker: str) -> None:
         "keywords": row.get("keywords", ""),
     }
 
-    resp = requests.post(f"{url}/rest/v1/ice", json=body, headers=headers, timeout=30)
-    resp.raise_for_status()
+    resp = requests.post(f"{url}/rest/v1/{table_name}?on_conflict={on_conflict}", json=body, headers=headers, timeout=30)
+    if resp.status_code == 409:
+        # Fallback: PATCH by email (e.g. RLS or conflict target mismatch)
+        email = row.get("email", "")
+        if email:
+            patch_resp = requests.patch(
+                f"{url}/rest/v1/{table_name}?email=eq.{quote(email, safe='')}",
+                json=body,
+                headers=supabase_headers(key),
+                timeout=30,
+            )
+            patch_resp.raise_for_status()
+        else:
+            resp.raise_for_status()
+    else:
+        resp.raise_for_status()
 
 
 # ---------------------------------------------------------------------------
@@ -362,18 +378,20 @@ with st.sidebar:
 
     supabase_url = st.text_input(
         "Supabase URL",
-        value="https://kogjdgxvrxfxqbkchxpi.supabase.co",
-        help="Your Supabase project URL",
+        value=os.environ.get("SUPABASE_URL", "https://kogjdgxvrxfxqbkchxpi.supabase.co"),
+        help="Your Supabase project URL. Override with env SUPABASE_URL.",
     )
     supabase_key = st.text_input(
         "Supabase Anon Key",
         type="password",
-        help="Your Supabase anonymous/public key",
+        value=os.environ.get("SUPABASE_ANON_KEY", ""),
+        help="Your Supabase anonymous/public key. Override with env SUPABASE_ANON_KEY.",
     )
     cerebras_key = st.text_input(
         "Cerebras API Key",
         type="password",
-        help="Your Cerebras API key",
+        value=os.environ.get("CEREBRAS_API_KEY", ""),
+        help="Your Cerebras API key. Override with env CEREBRAS_API_KEY.",
     )
 
     st.divider()
@@ -394,6 +412,17 @@ with st.sidebar:
             help="Use placeholders: {first_name}, {company}, {title}, {headline}, {city}, {country}, {industry}, {employees}, {website}, {keywords}",
         )
 
+    ice_table_name = st.text_input(
+        "Ice table name",
+        value=os.environ.get("ICE_TABLE_NAME", "ice"),
+        help="Supabase table where icebreakers are saved. Override with env ICE_TABLE_NAME.",
+    )
+    on_conflict_column = st.text_input(
+        "Upsert conflict column",
+        value="email",
+        help="Unique column for merge (e.g. email). Must match a unique constraint on the table.",
+    )
+
 keys_ready = bool(supabase_url and supabase_key and cerebras_key)
 supabase_ready = bool(supabase_url and supabase_key)
 
@@ -401,7 +430,7 @@ if not supabase_ready:
     st.info("Enter your Supabase URL and Anon Key in the sidebar to get started.")
     st.stop()
 
-st.caption("Saves go to the Supabase project and **ice** table configured in the sidebar.")
+st.caption("Saves go to the Supabase project and table configured in the sidebar.")
 
 # ===================================================================
 # Data source: tabs
@@ -415,7 +444,7 @@ with tab_supabase:
         if st.button("Load Data", type="primary", use_container_width=True, key="load_data"):
             with st.spinner("Loading ice table from Supabase..."):
                 try:
-                    data = load_ice_table(supabase_url, supabase_key)
+                    data = load_ice_table(supabase_url, supabase_key, ice_table_name)
                     st.session_state["ice_data"] = data
                     st.session_state["data_source"] = "supabase"
                     st.session_state["stop_requested"] = False
@@ -425,15 +454,15 @@ with tab_supabase:
         if st.button("Sync New Contacts", use_container_width=True, help="Copy contacts not yet in ice table", key="sync_contacts"):
             with st.spinner("Syncing contacts..."):
                 try:
-                    ice_rows = load_ice_table(supabase_url, supabase_key)
-                    ice_emails = {r["email"] for r in ice_rows if r.get("email")}
-                    contacts = load_contacts(supabase_url, supabase_key)
-                    count = sync_contacts_to_ice(supabase_url, supabase_key, contacts, ice_emails)
+                ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
+                ice_emails = {r["email"] for r in ice_rows if r.get("email")}
+                contacts = load_contacts(supabase_url, supabase_key)
+                count = sync_contacts_to_ice(supabase_url, supabase_key, ice_table_name, contacts, ice_emails, on_conflict_column)
                     if count > 0:
                         st.success(f"Synced {count} new contacts. Click 'Load Data' to refresh.")
                     else:
                         st.info("All contacts already in ice table.")
-                    st.session_state["ice_data"] = load_ice_table(supabase_url, supabase_key)
+                    st.session_state["ice_data"] = load_ice_table(supabase_url, supabase_key, ice_table_name)
                 except Exception as e:
                     st.error(f"Failed to sync: {e}")
 
@@ -562,7 +591,7 @@ else:
                 icebreaker = f"API_ERROR: {e}"
 
             try:
-                upsert_to_ice(supabase_url, supabase_key, row, icebreaker)
+                upsert_to_ice(supabase_url, supabase_key, ice_table_name, row, icebreaker, on_conflict_column)
                 saved = True
             except Exception as e:
                 saved = False
@@ -584,7 +613,7 @@ else:
 
         if data_source == "supabase":
             try:
-                st.session_state["ice_data"] = load_ice_table(supabase_url, supabase_key)
+                st.session_state["ice_data"] = load_ice_table(supabase_url, supabase_key, ice_table_name)
             except Exception:
                 pass
 
