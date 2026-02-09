@@ -171,10 +171,10 @@ def load_ice_table(url: str, key: str, table_name: str, limit: int = 2000) -> li
     return resp.json()
 
 
-def load_contacts(url: str, key: str) -> list[dict]:
-    """Load contacts that have an email address."""
+def load_contacts(url: str, key: str, contacts_table_name: str = "contacts") -> list[dict]:
+    """Load contacts that have an email address from the given table."""
     resp = requests.get(
-        f"{url}/rest/v1/contacts",
+        f"{url}/rest/v1/{contacts_table_name}",
         params={"select": "*", "email": "not.is.null", "limit": "2000"},
         headers=supabase_headers(key),
         timeout=30,
@@ -412,15 +412,22 @@ with st.sidebar:
             help="Use placeholders: {first_name}, {company}, {title}, {headline}, {city}, {country}, {industry}, {employees}, {website}, {keywords}",
         )
 
+    st.divider()
+    st.header("Source and destination")
+    contacts_table_name = st.text_input(
+        "Contacts table (source)",
+        value=os.environ.get("CONTACTS_TABLE_NAME", "contacts"),
+        help="Supabase table to load contacts from for Sync. Override with env CONTACTS_TABLE_NAME.",
+    )
     ice_table_name = st.text_input(
-        "Ice table name",
+        "Ice table (destination)",
         value=os.environ.get("ICE_TABLE_NAME", "ice"),
         help="Supabase table where icebreakers are saved. Override with env ICE_TABLE_NAME.",
     )
     on_conflict_column = st.text_input(
         "Upsert conflict column",
         value="email",
-        help="Unique column for merge (e.g. email). Must match a unique constraint on the table.",
+        help="Unique column for merge (e.g. email). Must match a unique constraint on the ice table.",
     )
 
 keys_ready = bool(supabase_url and supabase_key and cerebras_key)
@@ -430,7 +437,8 @@ if not supabase_ready:
     st.info("Enter your Supabase URL and Anon Key in the sidebar to get started.")
     st.stop()
 
-st.caption("Saves go to the Supabase project and table configured in the sidebar.")
+# Show source and destination so user has full control
+st.caption(f"**Source:** Supabase — contacts from table **{contacts_table_name}**. **Destination:** Icebreakers saved to table **{ice_table_name}**. Edit in sidebar under \"Source and destination\".")
 
 # ===================================================================
 # Data source: tabs
@@ -456,7 +464,7 @@ with tab_supabase:
                 try:
                     ice_rows = load_ice_table(supabase_url, supabase_key, ice_table_name)
                     ice_emails = {r["email"] for r in ice_rows if r.get("email")}
-                    contacts = load_contacts(supabase_url, supabase_key)
+                    contacts = load_contacts(supabase_url, supabase_key, contacts_table_name)
                     count = sync_contacts_to_ice(supabase_url, supabase_key, ice_table_name, contacts, ice_emails, on_conflict_column)
                     if count > 0:
                         st.success(f"Synced {count} new contacts. Click 'Load Data' to refresh.")
